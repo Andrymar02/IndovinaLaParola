@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io(window.location.hostname + ':3001');
+const socket = io({
+  transports: ['websocket'], // Forza l'uso di WebSocket invece di polling HTTP
+  upgrade: false
+});
 
 const getLetterColors = (guess, targetWord) => {
   if (!guess || !targetWord) return [];

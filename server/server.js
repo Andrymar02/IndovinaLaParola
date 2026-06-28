@@ -3,20 +3,30 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const readline = require('readline');
 
 const app = express();
 app.use(cors());
 
-app.use(express.static(path.join(__dirname, 'dist')));
-app.get(/.*/, (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+// --- FIX PERCORSO E FALLBACK SPA ---
+const DIST_PATH = path.join(__dirname, 'dist');
+app.use(express.static(DIST_PATH));
+
+// Fallback "Old School" a prova di errore per React/Vite
+app.use((req, res, next) => {
+  if (!req.url.startsWith('/socket.io') && !req.url.includes('.')) {
+    res.sendFile(path.join(DIST_PATH, 'index.html'));
+  } else {
+    next();
+  }
 });
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "http://localhost:5174"], 
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
@@ -35,32 +45,58 @@ DICTIONARY[8].answerList = ['ABBAGLIO', 'ABITUDINE', 'ACCAREZZARE', 'ACCETTARE',
 DICTIONARY[9].answerList = ['ABBONDANTE', 'ABITUDINE', 'ACQUISITO', 'ALLEVIARE', 'AMBIZIOSO', 'AUTENTICO', 'BENESSERE', 'CAPOLAVORO', 'CARATTERE', 'CELEBRARE', 'CONOSCENZA', 'DECIDERE', 'DIVERSO', 'DOMINANTE', 'EMOZIONE', 'EVOLUZIONE', 'FANTASIOSO', 'FERVENTE', 'FIDUCIOSA', 'GIOIOSO', 'GLORIOSO', 'GRANDIOSO', 'GUADAGNARE', 'ILLUMINARE', 'IMPORTANTE', 'INTUITIVO', 'LIBERTÀ', 'MIGLIORARE', 'MOTIVAZIONE', 'NOBILTÀ', 'OFFRIRE', 'PAZIENZA', 'PICCANTE', 'PREZIOSO', 'PROTEGGERE', 'RAGGIUNGERE', 'RAFFORZARE', 'REALIZZARE', 'RINNOVARE', 'RISOLVERE', 'ROMANTICO', 'SIMBOLICO', 'SINERGICO', 'TRIONFARE', 'VALORIZZARE', 'VITALITÀ'];
 DICTIONARY[10].answerList = ['ABBONDANZA', 'ALLEGRIA', 'AMPIAMENTE', 'APPREZZARE', 'CAMBIAMENTO', 'CHIAREZZA', 'CONTINUITÀ', 'DEDICARSI', 'EVOLUZIONE', 'IMPEGNATIVO', 'ISPIRAZIONE', 'LENTAMENTE', 'MIGLIORARE', 'MOTIVAZIONE', 'PROSPERARE', 'REALIZZARE', 'TRASPARENZA', 'UNICITÀ'];
 
-// FETCH DIZIONARIO ESTESO (GUESS LIST)
-console.log("⏳ Download del vocabolario italiano completo (fino a 10 lettere) in corso...");
-fetch('https://raw.githubusercontent.com/napolux/paroleitaliane/master/paroleitaliane/660000_parole_italiane.txt')
-  .then(res => res.text())
-  .then(text => {
-    const words = text.split('\n');
-    let count = 0;
-    words.forEach(w => {
-      const cleanWord = w.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
-      const len = cleanWord.length;
-      if (len >= 4 && len <= 10) {
-        if (!DICTIONARY[len].answerList.includes(cleanWord) && !DICTIONARY[len].guessList.includes(cleanWord)) {
-          DICTIONARY[len].guessList.push(cleanWord);
-          count++;
-        }
-      }
-    });
-    console.log(`✅ Dizionario caricato! ${count} parole inserite nelle Guess Lists.`);
-  })
-  .catch(err => {
-    console.log("⚠️ Errore download vocabolario esterno.", err);
+// --- CARICAMENTO DIZIONARIO LOCALE (ULTRA VELOCE CON SET E STREAM) ---
+console.log("⏳ Caricamento dizionario ottimizzato in corso...");
+const seenWords = new Set();
+
+// Inseriamo prima le nostre parole segrete per non duplicarle
+for (let i = 4; i <= 10; i++) {
+  DICTIONARY[i].answerList.forEach(w => seenWords.add(w));
+}
+
+const dictPath = path.join(__dirname, 'dizionario.txt');
+
+if (fs.existsSync(dictPath)) {
+  const fileStream = fs.createReadStream(dictPath);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity
   });
 
+  let count = 0;
+  rl.on('line', (line) => {
+    const cleanWord = line.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+    const len = cleanWord.length;
+    
+    if (len >= 4 && len <= 10) {
+      if (!seenWords.has(cleanWord)) {
+        seenWords.add(cleanWord);
+        DICTIONARY[len].guessList.push(cleanWord);
+        count++;
+      }
+    }
+  });
+
+  rl.on('close', () => {
+    console.log(`✅ Dizionario caricato a razzo! ${count} parole inserite.`);
+    avviaServer();
+  });
+} else {
+  console.log("⚠️ ATTENZIONE: File 'dizionario.txt' non trovato! Avvio server solo con parole base.");
+  avviaServer();
+}
+
+// Funzione isolata per l'avvio del server, richiamata SOLO dopo il caricamento
+function avviaServer() {
+  const PORT = process.env.PORT || 3001;
+  server.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Server in ascolto su 0.0.0.0:${PORT}`);
+  });
+}
+
+// --- LOGICA SOCKET.IO E LOBBY ---
 const lobbies = {};
 
-// GESTIONE UNIFICATA DELL'USCITA DI UN GIOCATORE (Fix Bug Tasto Esci)
 const handlePlayerLeave = (socketId) => {
   for (const roomCode in lobbies) {
     const room = lobbies[roomCode];
@@ -85,7 +121,6 @@ const handlePlayerLeave = (socketId) => {
         if (room.settings.mode === 'coop' && room.currentTurn === socketId) {
            room.currentTurn = room.players[0].id;
         }
-        // Avvisiamo la stanza aggiornata
         io.to(roomCode).emit('lobby_updated', room);
         io.to(roomCode).emit('error_message', { message: `⚠️ ${playerName} ha abbandonato la stanza.` });
       }
@@ -132,9 +167,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // NUOVO EVENTO TASTINO ESCI: Gestisce l'uscita PRIMA di avvisare la stanza
   socket.on('leave_lobby', (data) => {
-    socket.leave(data.roomCode); // Impedisce di ricevere 'lobby_updated' di ritorno
+    socket.leave(data.roomCode); 
     handlePlayerLeave(socket.id);
   });
 
@@ -209,9 +243,4 @@ io.on('connection', (socket) => {
       io.to(data.roomCode).emit('back_to_lobby');
     }
   });
-});
-
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`🚀 Server Socket.io attivo su http://localhost:${PORT}`);
 });
